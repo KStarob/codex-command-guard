@@ -61,15 +61,25 @@ public enum CatastrophicPolicy {
     }
 
     private static func isBroadDeletionTarget(_ target: String, cwd: URL) -> Bool {
-        let expanded = target == "~" || target.hasPrefix("~/")
-            ? NSHomeDirectory() + String(target.dropFirst())
-            : target
+        let expanded: String
+        if target == "~" || target.hasPrefix("~/") {
+            expanded = NSHomeDirectory() + String(target.dropFirst())
+        } else if target == "$HOME" || target.hasPrefix("$HOME/") {
+            expanded = NSHomeDirectory() + String(target.dropFirst(5))
+        } else if target == "${HOME}" || target.hasPrefix("${HOME}/") {
+            expanded = NSHomeDirectory() + String(target.dropFirst(7))
+        } else {
+            expanded = target
+        }
         let literal = expanded.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         if ["", ".", "..", "*", "Users"].contains(literal) { return true }
-        if expanded == NSHomeDirectory() || expanded == NSHomeDirectory() + "/" { return true }
-        if expanded == cwd.path || expanded == cwd.path + "/" { return true }
         if expanded.contains("/*") || expanded.contains("/.*") { return true }
-        return false
+        let base = cwd.standardizedFileURL
+        let resolved = URL(fileURLWithPath: expanded, relativeTo: base).standardizedFileURL.path
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).standardizedFileURL.path
+        let broadRoots = ["/", "/Users", home, base.path]
+        if broadRoots.contains(resolved) { return true }
+        return base.path.hasPrefix(resolved.hasSuffix("/") ? resolved : resolved + "/")
     }
 
     private static func evaluateGit(_ original: [String]) -> PolicyDecision? {
@@ -86,9 +96,11 @@ public enum CatastrophicPolicy {
             let broad = flags.contains("d") || flags.contains("x") || flags.contains("X")
             return forced && broad && !dryRun ? deny("git.clean-force", "Forced broad Git clean") : nil
         case "checkout":
-            return rest.contains("--") && rest.last == "." ? deny("git.restore-worktree", "Whole-worktree checkout discards changes") : nil
+            return rest.contains("--") && rest.last.map(isWholeWorktreePathspec) == true
+                ? deny("git.restore-worktree", "Whole-worktree checkout discards changes") : nil
         case "restore":
-            return rest.last == "." ? deny("git.restore-worktree", "Whole-worktree restore discards changes") : nil
+            return rest.last.map(isWholeWorktreePathspec) == true
+                ? deny("git.restore-worktree", "Whole-worktree restore discards changes") : nil
         case "push": return evaluateGitPush(rest)
         default: return nil
         }
@@ -109,14 +121,33 @@ public enum CatastrophicPolicy {
         if args.contains("--mirror") || args.contains("--all") {
             return deny("git.force-protected", "Mirror or all-ref push has broad impact")
         }
-        let forced = args.contains("--force") || args.contains("-f") || args.contains("--force-with-lease")
+        let forced = args.contains("--force")
+            || args.contains("-f")
+            || args.contains("--force-with-lease")
+            || args.contains(where: { $0.hasPrefix("--force-with-lease=") || $0.hasPrefix("+") })
         guard forced else { return nil }
-        let protected = args.contains { arg in
-            let lower = arg.lowercased()
-            return ["main", "master", "dev", "develop"].contains(lower)
-                || lower.hasPrefix("release/") || lower.hasPrefix("refs/heads/release/")
-        }
+        let protected = args.contains(where: isProtectedGitPushArgument)
         return protected ? deny("git.force-protected", "Force push targets a protected branch") : nil
+    }
+
+    private static func isWholeWorktreePathspec(_ value: String) -> Bool {
+        let base = URL(fileURLWithPath: "/__codex_guard_worktree__", isDirectory: true)
+        return URL(fileURLWithPath: value, relativeTo: base).standardizedFileURL.path == base.path
+    }
+
+    private static func isProtectedGitPushArgument(_ argument: String) -> Bool {
+        var value = argument.lowercased()
+        if value.hasPrefix("--force-with-lease=") {
+            value = String(value.dropFirst("--force-with-lease=".count))
+            value = String(value.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[0])
+        } else {
+            if value.hasPrefix("-") && !value.hasPrefix("+") { return false }
+            if value.hasPrefix("+") { value.removeFirst() }
+            let sides = value.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            if sides.count == 2, !sides[1].isEmpty { value = String(sides[1]) }
+        }
+        if value.hasPrefix("refs/heads/") { value.removeFirst("refs/heads/".count) }
+        return ["main", "master", "dev", "develop"].contains(value) || value.hasPrefix("release/")
     }
 
     private static func evaluateDocker(_ args: [String]) -> PolicyDecision? {
