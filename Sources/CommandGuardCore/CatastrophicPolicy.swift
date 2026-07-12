@@ -30,7 +30,7 @@ public enum CatastrophicPolicy {
         case "git": return evaluateGit(item.arguments)
         case "dd": return item.arguments.contains(where: { $0.lowercased().hasPrefix("of=/dev/") })
             ? deny("device.raw-write", "Raw-device output is destructive") : nil
-        case "diskutil": return item.arguments.first.map { ["erasedisk", "erasevolume", "partitiondisk", "secureerase"].contains($0.lowercased()) } == true
+        case "diskutil": return stripDiskutilGlobalOptions(item.arguments).first.map { ["erasedisk", "erasevolume", "partitiondisk", "secureerase"].contains($0.lowercased()) } == true
             ? deny("device.diskutil-erase", "Disk erase or partition operation") : nil
         case let executable where executable.hasPrefix("mkfs"):
             return item.arguments.contains(where: isDevicePath) ? deny("device.mkfs", "Filesystem creation on a device") : nil
@@ -151,13 +151,17 @@ public enum CatastrophicPolicy {
     }
 
     private static func evaluateDocker(_ args: [String]) -> PolicyDecision? {
-        let lower = args.map { $0.lowercased() }
+        let lower = stripLeadingGlobalOptions(
+            args,
+            valueOptions: ["--config", "--context", "-c", "--host", "-h", "--log-level"]
+        ).map { $0.lowercased() }
         return lower.starts(with: ["system", "prune"]) && lower.contains(where: { $0 == "--volumes" })
             ? deny("docker.prune-volumes", "Docker system prune includes volumes") : nil
     }
 
     private static func evaluateTerraform(_ args: [String]) -> PolicyDecision? {
-        let lower = args.map { $0.lowercased() }
+        var lower = args.map { $0.lowercased() }
+        while lower.first?.hasPrefix("-chdir=") == true { lower.removeFirst() }
         if lower.first == "destroy" { return deny("terraform.destroy", "Terraform destroy") }
         if lower.first == "plan" && lower.contains("-destroy") {
             return deny("terraform.destroy-plan", "Terraform destroy plan creation")
@@ -188,7 +192,13 @@ public enum CatastrophicPolicy {
     }
 
     private static func evaluateAWS(_ args: [String]) -> PolicyDecision? {
-        let lower = args.map { $0.lowercased() }
+        let lower = stripLeadingGlobalOptions(
+            args,
+            valueOptions: [
+                "--ca-bundle", "--cli-auto-prompt", "--cli-binary-format", "--cli-connect-timeout",
+                "--cli-read-timeout", "--color", "--endpoint-url", "--output", "--profile", "--region",
+            ]
+        ).map { $0.lowercased() }
         return lower.starts(with: ["s3", "rm"]) && lower.contains("--recursive")
             ? deny("cloud.recursive-delete", "Recursive cloud object deletion") : nil
     }
@@ -208,9 +218,83 @@ public enum CatastrophicPolicy {
     private static func evaluateRsync(_ args: [String]) -> PolicyDecision? {
         let lower = args.map { $0.lowercased() }
         guard lower.contains("--delete") || lower.contains(where: { $0.hasPrefix("--delete-") }) else { return nil }
-        guard let destination = args.last else { return nil }
-        let broad = destination == "/" || destination == NSHomeDirectory() || destination.hasPrefix("/Users/")
+        guard let destination = rsyncOperands(args).last else { return nil }
+        let expanded = expandHome(destination)
+        let path = URL(fileURLWithPath: expanded).standardizedFileURL.path
+        let components = URL(fileURLWithPath: path).pathComponents
+        let broad = path == "/"
+            || path == "/Users"
+            || path == URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL.path
+            || (components.count == 3 && components[0] == "/" && components[1] == "Users")
         return broad ? deny("filesystem.sync-delete", "Delete-sync targets a broad local path") : nil
+    }
+
+    private static func stripLeadingGlobalOptions(_ args: [String], valueOptions: Set<String>) -> [String] {
+        var index = 0
+        while index < args.count {
+            let argument = args[index]
+            if argument == "--" { index += 1; break }
+            guard argument.hasPrefix("-") else { break }
+            let option = String(argument.split(separator: "=", maxSplits: 1)[0]).lowercased()
+            index += 1
+            if !argument.contains("="), valueOptions.contains(option), index < args.count {
+                index += 1
+            }
+        }
+        return Array(args.dropFirst(index))
+    }
+
+    private static func stripDiskutilGlobalOptions(_ args: [String]) -> [String] {
+        var result = args
+        while let first = result.first, ["quiet", "plist"].contains(first.lowercased()) {
+            result.removeFirst()
+        }
+        return result
+    }
+
+    private static func rsyncOperands(_ args: [String]) -> [String] {
+        let valueOptions: Set<String> = [
+            "-e", "--address", "--backup-dir", "--bwlimit", "--chmod", "--compare-dest",
+            "--contimeout", "--copy-dest", "--exclude", "--exclude-from", "--files-from",
+            "--filter", "--groupmap", "--include", "--include-from", "--link-dest", "--log-file",
+            "--log-file-format", "--max-delete", "--out-format", "--password-file", "--port",
+            "--rsync-path", "--rsh", "--sockopts", "--suffix", "--timeout", "--usermap",
+        ]
+        var operands: [String] = []
+        var index = 0
+        var optionsEnded = false
+        while index < args.count {
+            let argument = args[index]
+            if !optionsEnded && argument == "--" {
+                optionsEnded = true
+                index += 1
+                continue
+            }
+            if !optionsEnded && argument.hasPrefix("-") {
+                let option = String(argument.split(separator: "=", maxSplits: 1)[0]).lowercased()
+                index += 1
+                if !argument.contains("="), valueOptions.contains(option), index < args.count {
+                    index += 1
+                }
+                continue
+            }
+            operands.append(argument)
+            index += 1
+        }
+        return operands
+    }
+
+    private static func expandHome(_ value: String) -> String {
+        if value == "~" || value.hasPrefix("~/") {
+            return NSHomeDirectory() + String(value.dropFirst())
+        }
+        if value == "$HOME" || value.hasPrefix("$HOME/") {
+            return NSHomeDirectory() + String(value.dropFirst(5))
+        }
+        if value == "${HOME}" || value.hasPrefix("${HOME}/") {
+            return NSHomeDirectory() + String(value.dropFirst(7))
+        }
+        return value
     }
 
     private static func isDevicePath(_ value: String) -> Bool {
