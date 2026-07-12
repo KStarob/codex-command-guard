@@ -69,6 +69,21 @@ private struct PolicyFixture: Decodable {
     let ruleID: String?
 }
 
+private final class LockedResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Bool] = []
+
+    func append(_ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        values.append(value)
+    }
+
+    var successCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return values.filter { $0 }.count
+    }
+}
+
 @MainActor
 private func testCatastrophicPolicy() {
     do {
@@ -99,9 +114,81 @@ private func testCatastrophicPolicy() {
     }
 }
 
+@MainActor
+private func testAuthorizationStore() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("command-guard-state-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    let store = AuthorizationStore(root: root)
+    let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+    do {
+        let pending = try store.recordPending(command: "git reset --hard", now: t0)
+        expect(pending.code.count == 7, "pending display code length")
+        let loaded = try store.pending(code: pending.code, now: t0)
+        expect(loaded?.command == "git reset --hard", "load pending exact command")
+
+        try store.authorize(code: pending.code, now: t0)
+        let changed = try store.consume(command: "git reset --hard HEAD~1", now: t0)
+        let exact = try store.consume(command: "git reset --hard", now: t0)
+        let reused = try store.consume(command: "git reset --hard", now: t0)
+        expect(!changed, "reject changed command")
+        expect(exact, "consume exact authorization")
+        expect(!reused, "authorization is single-use")
+
+        let expired = try store.recordPending(command: "rm -rf /", now: t0)
+        try store.authorize(code: expired.code, now: t0)
+        let expiredResult = try store.consume(command: "rm -rf /", now: t0.addingTimeInterval(301))
+        expect(!expiredResult, "authorization expires after five minutes")
+
+        let rootMode = (try fm.attributesOfItem(atPath: root.path)[.posixPermissions] as? NSNumber)?.intValue
+        expect(rootMode == 0o700, "state directory mode 0700")
+        let files = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        for file in files {
+            let mode = (try fm.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue
+            expect(mode == 0o600, "state file mode 0600: \(file.lastPathComponent)")
+        }
+
+        let concurrent = try store.recordPending(command: "git clean -fdx", now: t0)
+        try store.authorize(code: concurrent.code, now: t0)
+        let start = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        let results = LockedResults()
+        for _ in 0..<64 {
+            group.enter()
+            DispatchQueue.global().async {
+                start.wait()
+                results.append((try? store.consume(command: "git clean -fdx", now: t0)) == true)
+                group.leave()
+            }
+        }
+        for _ in 0..<64 { start.signal() }
+        group.wait()
+        expect(results.successCount == 1, "exactly one concurrent authorization consumer")
+    } catch {
+        expect(false, "authorization store operations: \(error)")
+    }
+
+    do {
+        let badRoot = fm.temporaryDirectory.appendingPathComponent("command-guard-link-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: badRoot) }
+        try fm.createSymbolicLink(at: badRoot, withDestinationURL: root)
+        let linked = AuthorizationStore(root: badRoot)
+        do {
+            _ = try linked.recordPending(command: "git reset --hard", now: t0)
+            expect(false, "reject symlink state root")
+        } catch {
+            expect(true, "symlink rejection")
+        }
+    } catch {
+        expect(false, "create symlink fixture: \(error)")
+    }
+}
+
 testHookProtocol()
 testShellScanner()
 testCatastrophicPolicy()
+testAuthorizationStore()
 
 if failures == 0 {
     print("PASS: command-guard-tests")
