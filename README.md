@@ -71,10 +71,16 @@ host canaries after trust must record actual coverage here:
 | Host path | Result |
 | --- | --- |
 | Direct hook protocol | intercepted; canaries pass |
-| Codex Desktop simple shell | pending |
+| Codex Desktop current-task `unified_exec` | not intercepted; task predates hook reload |
+| Codex Desktop new-task simple shell | pending after app restart and hook trust |
 | Codex Desktop continuing terminal | pending |
 | Codex Desktop nested `bash -c` | pending |
-| Codex CLI simple shell | pending |
+| Codex CLI simple shell | intercepted; deny and exact one-time allow verified |
+
+The one-time override was host-tested with macOS LocalAuthentication: the first
+exact command ran after Touch ID, its authorization was consumed atomically,
+and an identical second command was denied while the disposable repository's
+`HEAD` remained unchanged.
 
 `not_intercepted` is an expected documented limitation, not permission to claim
 complete protection.
