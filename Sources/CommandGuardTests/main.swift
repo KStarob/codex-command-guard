@@ -62,8 +62,46 @@ private func testShellScanner() {
     expect(deep.contains(where: \.ambiguous), "mark recursion depth overflow ambiguous")
 }
 
+private struct PolicyFixture: Decodable {
+    let command: String
+    let cwd: String
+    let expected: String
+    let ruleID: String?
+}
+
+@MainActor
+private func testCatastrophicPolicy() {
+    do {
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/commands.json")
+        let fixtures = try JSONDecoder().decode([PolicyFixture].self, from: Data(contentsOf: source))
+        expect(fixtures.count >= 40, "load complete policy fixture corpus")
+
+        for fixture in fixtures {
+            let decision = CatastrophicPolicy.evaluate(
+                command: fixture.command,
+                cwd: URL(fileURLWithPath: fixture.cwd, isDirectory: true)
+            )
+            switch (fixture.expected, decision) {
+            case ("allow", .allowed):
+                break
+            case ("deny", .denied(let ruleID, _)):
+                expect(ruleID == fixture.ruleID, "rule for: \(fixture.command)")
+            default:
+                expect(false, "decision \(decision) for: \(fixture.command)")
+            }
+        }
+    } catch {
+        expect(false, "load policy fixtures: \(error)")
+    }
+}
+
 testHookProtocol()
 testShellScanner()
+testCatastrophicPolicy()
 
 if failures == 0 {
     print("PASS: command-guard-tests")
