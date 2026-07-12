@@ -11,6 +11,35 @@ private func fail(_ message: String) -> Never {
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
+
+func option(_ name: String, in arguments: [String]) -> String? {
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else { return nil }
+    return arguments[index + 1]
+}
+
+if arguments.first == "install-hook" || arguments.first == "uninstall-hook" {
+    guard let binaryPath = option("--binary", in: arguments),
+          let hooksPath = option("--hooks", in: arguments)
+    else {
+        fail("usage: codex-command-guard \(arguments.first!) --binary <absolute-path> --hooks <path>")
+    }
+    let binary = URL(fileURLWithPath: binaryPath).standardizedFileURL
+    let hooks = URL(fileURLWithPath: hooksPath).standardizedFileURL
+    guard binary.path.hasPrefix("/") else { fail("binary path must be absolute") }
+    do {
+        if arguments.first == "install-hook" {
+            try HookInstaller.install(hooksURL: hooks, binaryURL: binary)
+            print("Installed Codex hook in \(hooks.path)")
+        } else {
+            try HookInstaller.uninstall(hooksURL: hooks, binaryURL: binary)
+            print("Removed Codex hook from \(hooks.path)")
+        }
+        exit(0)
+    } catch {
+        fail(String(describing: error))
+    }
+}
+
 if arguments.first == "allow-once" {
     guard arguments.count == 2 else { fail("usage: codex-command-guard allow-once <code>") }
     let code = arguments[1]

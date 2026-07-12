@@ -270,12 +270,73 @@ private func testManualAuthorizer() {
     }
 }
 
+@MainActor
+private func testHookInstaller() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("command-guard-installer-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    do { try fm.createDirectory(at: root, withIntermediateDirectories: true) }
+    catch { expect(false, "create installer fixture root: \(error)"); return }
+    let hooks = root.appendingPathComponent("hooks.json")
+    let binary = URL(fileURLWithPath: "/Users/test/.codex/local-hooks/bin/codex-command-guard")
+
+    do {
+        try HookInstaller.install(hooksURL: hooks, binaryURL: binary)
+        let installed = try JSONSerialization.jsonObject(with: Data(contentsOf: hooks)) as! [String: Any]
+        let rootHooks = installed["hooks"] as! [String: Any]
+        let groups = rootHooks["PreToolUse"] as! [[String: Any]]
+        expect(groups.count == 1, "install one PreToolUse group")
+        expect(groups[0]["matcher"] as? String == "^Bash$", "install Bash matcher")
+
+        let unrelated: [String: Any] = [
+            "hooks": [
+                "SessionStart": [["matcher": "startup", "hooks": [["type": "command", "command": "/tmp/existing"]]]],
+                "PreToolUse": groups,
+            ],
+            "custom": "preserve-me",
+        ]
+        try JSONSerialization.data(withJSONObject: unrelated, options: [.prettyPrinted, .sortedKeys]).write(to: hooks)
+        try HookInstaller.install(hooksURL: hooks, binaryURL: binary)
+        let merged = try JSONSerialization.jsonObject(with: Data(contentsOf: hooks)) as! [String: Any]
+        expect(merged["custom"] as? String == "preserve-me", "preserve unknown root fields")
+        let mergedHooks = merged["hooks"] as! [String: Any]
+        expect(mergedHooks["SessionStart"] != nil, "preserve unrelated hook events")
+        expect((mergedHooks["PreToolUse"] as! [[String: Any]]).count == 1, "installation is idempotent")
+
+        try HookInstaller.uninstall(hooksURL: hooks, binaryURL: binary)
+        let removed = try JSONSerialization.jsonObject(with: Data(contentsOf: hooks)) as! [String: Any]
+        let removedHooks = removed["hooks"] as! [String: Any]
+        expect(removedHooks["SessionStart"] != nil, "rollback preserves unrelated hook")
+        expect((removedHooks["PreToolUse"] as? [[String: Any]])?.isEmpty != false, "rollback removes guard only")
+        let backups = try fm.contentsOfDirectory(atPath: root.path)
+        expect(backups.contains(where: { $0.hasPrefix("hooks.json.backup-") }), "installer creates backup")
+    } catch {
+        expect(false, "hook installer lifecycle: \(error)")
+    }
+
+    do {
+        let target = root.appendingPathComponent("real.json")
+        let link = root.appendingPathComponent("linked.json")
+        try Data("{}".utf8).write(to: target)
+        try fm.createSymbolicLink(at: link, withDestinationURL: target)
+        do {
+            try HookInstaller.install(hooksURL: link, binaryURL: binary)
+            expect(false, "installer rejects symlink hooks file")
+        } catch {
+            expect(true, "symlink hooks rejection")
+        }
+    } catch {
+        expect(false, "symlink installer fixture: \(error)")
+    }
+}
+
 testHookProtocol()
 testShellScanner()
 testCatastrophicPolicy()
 testAuthorizationStore()
 testGuardEngine()
 testManualAuthorizer()
+testHookInstaller()
 
 if failures == 0 {
     print("PASS: command-guard-tests")
