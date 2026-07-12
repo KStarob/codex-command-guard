@@ -52,6 +52,24 @@ private func testShellScanner() {
     let chained = ShellScanner.scan("git status; command nohup rm -rf /tmp/build || echo failed")
     expect(chained.map(\.executable) == ["git", "rm", "echo"], "split top-level shell operators")
 
+    let pipe = ShellScanner.scan("printf safe | git reset --hard")
+    expect(pipe.map(\.executable) == ["printf", "git"], "split single pipe")
+
+    let background = ShellScanner.scan("printf safe & git reset --hard")
+    expect(background.map(\.executable) == ["printf", "git"], "split background operator")
+
+    let multiline = ShellScanner.scan("printf safe\ngit reset --hard")
+    expect(multiline.map(\.executable) == ["printf", "git"], "split unquoted newline")
+
+    let substitution = ShellScanner.scan(#"printf "$(whoami)""#)
+    expect(substitution.count == 1 && substitution[0].ambiguous, "mark command substitution ambiguous")
+
+    let backticks = ShellScanner.scan(#"printf "`whoami`""#)
+    expect(backticks.count == 1 && backticks[0].ambiguous, "mark backticks ambiguous")
+
+    let quotedSubstitution = ShellScanner.scan(#"printf '%s' '$(whoami)'"#)
+    expect(quotedSubstitution.first?.ambiguous == false, "single-quoted substitution is literal")
+
     let malformed = ShellScanner.scan("rm -rf '/Users")
     expect(malformed.count == 1 && malformed[0].ambiguous, "mark unterminated quote ambiguous")
 
@@ -60,6 +78,26 @@ private func testShellScanner() {
 
     let deep = ShellScanner.scan(#"bash -c "bash -c 'bash -c \\"rm -rf /\\"'""#, maxDepth: 1)
     expect(deep.contains(where: \.ambiguous), "mark recursion depth overflow ambiguous")
+}
+
+@MainActor
+private func testAmbiguousPolicy() {
+    let cwd = URL(fileURLWithPath: "/tmp/project", isDirectory: true)
+    let decisions = [
+        CatastrophicPolicy.evaluate(command: #"printf "$(whoami)""#, cwd: cwd),
+        CatastrophicPolicy.evaluate(command: #"printf "`whoami`""#, cwd: cwd),
+    ]
+    for decision in decisions {
+        guard case .denied(let ruleID, _) = decision else {
+            expect(false, "deny executable shell ambiguity")
+            continue
+        }
+        expect(ruleID == "parser.ambiguous-shell", "ambiguity rule id")
+    }
+    expect(
+        CatastrophicPolicy.evaluate(command: #"printf '%s' '$(whoami)'"#, cwd: cwd) == .allowed,
+        "allow literal single-quoted substitution"
+    )
 }
 
 private struct PolicyFixture: Decodable {
@@ -332,6 +370,7 @@ private func testHookInstaller() {
 
 testHookProtocol()
 testShellScanner()
+testAmbiguousPolicy()
 testCatastrophicPolicy()
 testAuthorizationStore()
 testGuardEngine()

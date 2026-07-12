@@ -13,21 +13,11 @@ public enum PolicyDecision: Equatable, CustomStringConvertible, Sendable {
 }
 
 public enum CatastrophicPolicy {
-    private static let catastrophicMarkers = [
-        "rm", "reset", "clean", "destroy", "drop", "truncate", "erase",
-        "mkfs", "shred", "/dev/", "--force", "--mirror", "shutdown",
-        "reboot", "halt", "poweroff", "prune", "--delete",
-    ]
-
     public static func evaluate(command: String, cwd: URL) -> PolicyDecision {
         let scanned = ShellScanner.scan(command)
         for item in scanned {
             if item.ambiguous {
-                let lower = item.original.lowercased()
-                if catastrophicMarkers.contains(where: lower.contains) {
-                    return deny("parser.ambiguous-catastrophic", "Ambiguous command contains a catastrophic marker")
-                }
-                continue
+                return deny("parser.ambiguous-shell", "Shell syntax cannot be analyzed safely")
             }
             if let decision = evaluate(item, cwd: cwd) { return decision }
         }

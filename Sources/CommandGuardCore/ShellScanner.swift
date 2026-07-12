@@ -108,6 +108,7 @@ public enum ShellScanner {
         var single = false
         var double = false
         var escaped = false
+        var executableAmbiguity = false
         let characters = Array(text)
         var index = 0
 
@@ -133,13 +134,19 @@ public enum ShellScanner {
             }
             if !single && !double {
                 let next = index + 1 < characters.count ? characters[index + 1] : "\0"
-                if char == ";" || (char == "&" && next == "&") || (char == "|" && next == "|") {
+                if char == ";" || char == "\n" || char == "&" || char == "|" {
                     if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         segments.append(current)
                     }
                     current = ""
-                    index += (char == ";" ? 1 : 2)
+                    index += ((char == "&" || char == "|") && next == char ? 2 : 1)
                     continue
+                }
+            }
+            if !single {
+                let next = index + 1 < characters.count ? characters[index + 1] : "\0"
+                if char == "`" || (char == "$" && next == "(") {
+                    executableAmbiguity = true
                 }
             }
             current.append(char)
@@ -148,7 +155,7 @@ public enum ShellScanner {
         if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             segments.append(current)
         }
-        return (segments, single || double || escaped)
+        return (segments, single || double || escaped || executableAmbiguity)
     }
 
     private static func tokenize(_ text: String) -> (tokens: [String], ambiguous: Bool) {
