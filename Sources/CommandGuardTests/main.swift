@@ -38,7 +38,32 @@ private func testHookProtocol() {
     }
 }
 
+@MainActor
+private func testShellScanner() {
+    let nested = ShellScanner.scan(#"sudo env X=1 bash -c 'git reset --hard && echo done'"#)
+    expect(nested.map(\.executable) == ["git", "echo"], "scan nested wrapper executables")
+    expect(nested.first?.arguments == ["reset", "--hard"], "scan nested wrapper arguments")
+
+    let quoted = ShellScanner.scan(#"printf '%s' 'a;b'"#)
+    expect(quoted.count == 1, "do not split quoted semicolon")
+    expect(quoted.first?.arguments.last == "a;b", "preserve quoted semicolon")
+    expect(quoted.first?.ambiguous == false, "quoted command is unambiguous")
+
+    let chained = ShellScanner.scan("git status; command nohup rm -rf /tmp/build || echo failed")
+    expect(chained.map(\.executable) == ["git", "rm", "echo"], "split top-level shell operators")
+
+    let malformed = ShellScanner.scan("rm -rf '/Users")
+    expect(malformed.count == 1 && malformed[0].ambiguous, "mark unterminated quote ambiguous")
+
+    let oversized = ShellScanner.scan(String(repeating: "x", count: 64), maxBytes: 32)
+    expect(oversized.count == 1 && oversized[0].ambiguous, "mark oversized command ambiguous")
+
+    let deep = ShellScanner.scan(#"bash -c "bash -c 'bash -c \\"rm -rf /\\"'""#, maxDepth: 1)
+    expect(deep.contains(where: \.ambiguous), "mark recursion depth overflow ambiguous")
+}
+
 testHookProtocol()
+testShellScanner()
 
 if failures == 0 {
     print("PASS: command-guard-tests")
