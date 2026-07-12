@@ -1,32 +1,67 @@
 # Codex Command Guard
 
-A narrow, macOS-native `PreToolUse` emergency brake for catastrophic Codex
-commands. It preserves autonomous `danger-full-access` operation and is not a
-sandbox or complete enforcement boundary.
+Codex Command Guard is a small macOS-native `PreToolUse` hook that acts as an
+emergency brake for catastrophic shell commands while Codex operates with full
+filesystem access. Ordinary commands stay silent and autonomous. A recognized
+catastrophic or structurally ambiguous command is denied until the user grants
+one exact, short-lived authorization with Touch ID or the macOS password.
 
-## Behavior
+It is intentionally narrow: this is a last line of defense against accidental
+or attacker-influenced command generation, not a sandbox.
 
-Ordinary commands exit silently. Recognized catastrophic commands return the
-minimal Codex `permissionDecision: deny` response and a short authorization
-code. Rules cover broad recursive deletion, destructive Git workspace/history
-operations, raw-device writes, system power, selected mass infrastructure and
-database operations, and broad cloud sync/delete operations.
+## What It Protects
 
-Repository files cannot configure or weaken the guard. It performs no network
-access and writes no persistent command history.
+The policy covers high-impact forms of:
 
-## One-Time Authorization
+- broad recursive filesystem deletion;
+- destructive Git worktree/history operations and protected force-pushes;
+- raw-device writes, disk erase, filesystem creation, and system power actions;
+- Docker volume pruning and Terraform/OpenTofu destruction;
+- mass Kubernetes deletion and destructive database statements;
+- recursive cloud deletion and broad delete-sync operations.
 
-After reviewing the exact blocked command, run manually:
+The scanner recognizes ordinary shell command boundaries and nested
+`sh`/`bash`/`zsh -c` calls. Execution-bearing syntax it cannot safely reduce,
+such as command substitution and backticks, fails closed and requires one-time
+authorization.
 
-```bash
-~/.codex/local-hooks/bin/codex-command-guard allow-once ABCD-12
-```
+## Security Boundary
 
-macOS requires Touch ID or the account password. Approval is bound to the exact
-command bytes, expires after five minutes, and is consumed once.
+Codex Command Guard does not:
 
-## Build And Verify
+- replace macOS permissions, backups, Git commits, or remote branch protection;
+- understand the complete Bash/zsh grammar;
+- guarantee interception of shell execution paths that Codex does not send
+  through the configured hook;
+- resist a malicious process already running as the same macOS user with
+  unrestricted filesystem access;
+- cryptographically prove that an on-disk one-time authorization record came
+  from Touch ID.
+
+The last point matters when threat-modeling full access: the current
+authorization store is designed to prevent accidents and replay, not a
+deliberate same-user bypass. Records are still exact-command, short-lived,
+single-use, private (`0600`), and consumed atomically.
+
+See [SECURITY.md](SECURITY.md) for supported versions and vulnerability
+reporting.
+
+## Requirements And Compatibility
+
+- macOS 13 or newer;
+- Swift 6 toolchain (Apple Command Line Tools are sufficient; full Xcode is not
+  required);
+- a Codex build that supports global `PreToolUse` command hooks with the `Bash`
+  matcher.
+
+This release was verified locally with Codex CLI `0.144.0-alpha.4`, Codex
+Desktop `26.707.51957`, and Apple Swift `6.3.3`. Hook APIs can evolve, so a new
+Codex release should be canary-tested before relying on interception. At the
+time of verification, some newer/current-task `unified_exec` paths were not
+intercepted; direct hook and Codex CLI paths were intercepted. A newly started
+task is required after installing or changing hooks.
+
+## Build And Test
 
 ```bash
 swift run command-guard-tests
@@ -35,55 +70,84 @@ swift scripts/run-canaries.swift --binary .build/release/codex-command-guard
 swift scripts/benchmark.swift --binary .build/release/codex-command-guard
 ```
 
-This repository uses a standalone Swift test executable because the installed
-Command Line Tools include `swiftc` but not the XCTest/Swift Testing runtime.
+The canary script never executes the command text it tests. It submits JSON to
+the guard binary and verifies the allow/deny response against a disposable
+sentinel directory.
 
 ## Install
 
-The verified binary is installed at:
-
-```text
-~/.codex/local-hooks/bin/codex-command-guard
-```
-
-The binary's `install-hook` command merges one global `PreToolUse` handler into
-`~/.codex/hooks.json`, preserving unrelated hooks and writing a private backup.
-Codex must then review and trust the hook definition in Settings → Hooks or
-`/hooks`.
-
-## Rollback
+Clone the repository, review the source, and run:
 
 ```bash
-~/.codex/local-hooks/bin/codex-command-guard uninstall-hook \
-  --binary ~/.codex/local-hooks/bin/codex-command-guard \
-  --hooks ~/.codex/hooks.json
+swift run command-guard-tests
+swift build -c release
+install -d -m 700 "$HOME/.codex/local-hooks/bin"
+install -m 755 .build/release/codex-command-guard \
+  "$HOME/.codex/local-hooks/bin/codex-command-guard"
+"$HOME/.codex/local-hooks/bin/codex-command-guard" install-hook \
+  --binary "$HOME/.codex/local-hooks/bin/codex-command-guard" \
+  --hooks "$HOME/.codex/hooks.json"
 ```
 
-This removes only the matching guard handler. It does not change
-`approval_policy`, `sandbox_mode`, other hooks, the source checkout, or state.
+Restart Codex, open **Settings → Hooks**, review the `PreToolUse` entry, press
+**Trust**, and ensure it is enabled. Codex intentionally requires review because
+hooks execute outside its normal sandbox.
 
-## Limitations And Canary Matrix
+The installer preserves unrelated hooks, creates a private backup of
+`hooks.json`, and installs only an exact `^Bash$` matcher.
 
-OpenAI documents that `PreToolUse` does not yet intercept every newer
-`unified_exec` shell path. Direct binary canaries prove the policy and transport;
-host canaries after trust must record actual coverage here:
+## One-Time Authorization
 
-| Host path | Result |
-| --- | --- |
-| Direct hook protocol | intercepted; canaries pass |
-| Codex Desktop current-task `unified_exec` | not intercepted; task predates hook reload |
-| Codex Desktop new-task simple shell | pending after app restart and hook trust |
-| Codex Desktop continuing terminal | pending |
-| Codex Desktop nested `bash -c` | pending |
-| Codex CLI simple shell | intercepted; deny and exact one-time allow verified |
+When a command is blocked, the denial contains a short code. Review the exact
+command shown by the guard, then run this manually in a terminal:
 
-The one-time override was host-tested with macOS LocalAuthentication: the first
-exact command ran after Touch ID, its authorization was consumed atomically,
-and an identical second command was denied while the disposable repository's
-`HEAD` remained unchanged.
+```bash
+"$HOME/.codex/local-hooks/bin/codex-command-guard" allow-once ABCD-12
+```
 
-`not_intercepted` is an expected documented limitation, not permission to claim
-complete protection.
+macOS displays a Touch ID/password prompt. Approval applies to the exact command
+bytes, expires after five minutes, and is consumed once.
 
-Release benchmark on this Mac (1,000 full subprocess invocations, alternating
-safe and denied commands): median 8.35 ms, p95 9.06 ms, max 38.91 ms.
+## Update
+
+```bash
+git pull --ff-only
+swift run command-guard-tests
+swift build -c release
+install -m 755 .build/release/codex-command-guard \
+  "$HOME/.codex/local-hooks/bin/codex-command-guard"
+```
+
+Restart Codex and review the hook again if the application marks the changed
+binary or configuration as needing trust.
+
+## Uninstall
+
+```bash
+"$HOME/.codex/local-hooks/bin/codex-command-guard" uninstall-hook \
+  --binary "$HOME/.codex/local-hooks/bin/codex-command-guard" \
+  --hooks "$HOME/.codex/hooks.json"
+```
+
+After verifying that Codex no longer lists the hook, the installed binary and
+its state directory may be removed manually. Uninstalling the hook does not
+change Codex approval or sandbox settings and does not modify unrelated hooks.
+
+## Performance
+
+The last local release benchmark measured roughly 8–9 ms median/p95 per full
+subprocess invocation. GitHub Actions checks the behavior, but does not enforce
+machine-specific latency thresholds.
+
+## Provenance
+
+This is an independent Swift implementation with no third-party package
+dependencies. It does not include source code or license text from
+`Dicklesworthstone/destructive_command_guard` (DCG). DCG and public reports of
+accidental destructive agent commands were evaluated as prior art and
+motivation; this repository uses its own architecture, parser, policy, tests,
+installer, and authorization flow.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
