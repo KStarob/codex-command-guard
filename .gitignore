@@ -2,3 +2,4 @@
 .build/
 .swiftpm/
 docs/superpowers/
+.DS_Store
