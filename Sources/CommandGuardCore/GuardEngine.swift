@@ -8,9 +8,16 @@ public struct GuardEngine {
     }
 
     public func process(input: Data, fallbackCWD: URL, now: Date = Date()) -> Data? {
-        guard let request = HookRequest.decode(input), let command = request.command else {
-            return nil
+        let request: HookRequest
+        switch HookRequest.decode(input) {
+        case .valid(let decoded):
+            request = decoded
+        case .invalid(let reason):
+            return HookResponse.denied(
+                reason: "BLOCKED by codex-command-guard [protocol.invalid-request]: \(reason)."
+            )
         }
+        let command = request.command
         let cwd = request.cwd.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? fallbackCWD
         guard case .denied(let ruleID, let reason) = CatastrophicPolicy.evaluate(command: command, cwd: cwd) else {
             return nil

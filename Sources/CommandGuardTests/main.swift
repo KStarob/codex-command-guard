@@ -14,11 +14,17 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 @MainActor
 private func testHookProtocol() {
     let bash = #"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}"#.data(using: .utf8)!
-    expect(HookRequest.decode(bash)?.command == "git status", "decode Bash command")
+    if case .valid(let request) = HookRequest.decode(bash) {
+        expect(request.command == "git status", "decode Bash command")
+    } else {
+        expect(false, "decode valid Bash request")
+    }
 
     let patch = #"{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"command":"rm -rf /"}}"#.data(using: .utf8)!
-    expect(HookRequest.decode(patch)?.command == nil, "ignore non-Bash tool")
-    expect(HookRequest.decode(Data("{".utf8)) == nil, "reject malformed JSON")
+    if case .invalid = HookRequest.decode(patch) { expect(true, "reject non-Bash tool") }
+    else { expect(false, "reject non-Bash tool") }
+    if case .invalid = HookRequest.decode(Data("{".utf8)) { expect(true, "reject malformed JSON") }
+    else { expect(false, "reject malformed JSON") }
 
     do {
         let raw = try JSONSerialization.jsonObject(with: HookResponse.denied(reason: "blocked"))
@@ -247,7 +253,24 @@ private func testGuardEngine() {
     }
 
     expect(engine.process(input: input("git status"), fallbackCWD: URL(fileURLWithPath: "/tmp/project"), now: now) == nil, "safe command is silent")
-    expect(engine.process(input: Data("{".utf8), fallbackCWD: URL(fileURLWithPath: "/tmp/project"), now: now) == nil, "malformed input is silent")
+    let invalidInputs: [Data] = [
+        Data("{".utf8),
+        Data(#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}"#.utf8),
+        Data(#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}"#.utf8),
+        Data(#"{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"command":"git status"}}"#.utf8),
+        Data(#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":7}}"#.utf8),
+    ]
+    for invalid in invalidInputs {
+        guard let denial = engine.process(input: invalid, fallbackCWD: URL(fileURLWithPath: "/tmp/project"), now: now),
+              let object = try? JSONSerialization.jsonObject(with: denial) as? [String: Any],
+              let output = object["hookSpecificOutput"] as? [String: String]
+        else {
+            expect(false, "invalid hook input emits denial")
+            continue
+        }
+        expect(output["permissionDecision"] == "deny", "invalid hook input decision")
+        expect(output["permissionDecisionReason"]?.contains("protocol.invalid-request") == true, "invalid hook input rule id")
+    }
 
     guard let denial = engine.process(input: input("git reset --hard"), fallbackCWD: URL(fileURLWithPath: "/tmp/project"), now: now),
           let object = try? JSONSerialization.jsonObject(with: denial) as? [String: Any],

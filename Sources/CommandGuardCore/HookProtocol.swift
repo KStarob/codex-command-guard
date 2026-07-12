@@ -1,11 +1,11 @@
 import Foundation
 
 public struct HookRequest: Sendable {
-    public let command: String?
+    public let command: String
     public let cwd: String?
 
     private struct WireRequest: Decodable {
-        let hookEventName: String
+        let hookEventName: String?
         let toolName: String?
         let toolInput: ToolInput?
         let cwd: String?
@@ -22,15 +22,26 @@ public struct HookRequest: Sendable {
         let command: String?
     }
 
-    public static func decode(_ data: Data) -> HookRequest? {
+    public static func decode(_ data: Data) -> HookRequestDecodeResult {
         guard let wire = try? JSONDecoder().decode(WireRequest.self, from: data) else {
-            return nil
+            return .invalid(reason: "malformed JSON or field types")
         }
-        let command = wire.hookEventName == "PreToolUse" && wire.toolName == "Bash"
-            ? wire.toolInput?.command
-            : nil
-        return HookRequest(command: command, cwd: wire.cwd)
+        guard wire.hookEventName == "PreToolUse" else {
+            return .invalid(reason: "unexpected or missing hook_event_name")
+        }
+        guard wire.toolName == "Bash" else {
+            return .invalid(reason: "unexpected or missing tool_name")
+        }
+        guard let command = wire.toolInput?.command, !command.isEmpty else {
+            return .invalid(reason: "missing Bash command")
+        }
+        return .valid(HookRequest(command: command, cwd: wire.cwd))
     }
+}
+
+public enum HookRequestDecodeResult: Sendable {
+    case valid(HookRequest)
+    case invalid(reason: String)
 }
 
 public enum HookResponse {
