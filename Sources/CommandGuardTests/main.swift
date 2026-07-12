@@ -84,6 +84,11 @@ private final class LockedResults: @unchecked Sendable {
     }
 }
 
+private struct FakeAuthenticator: Authenticating {
+    let result: Bool
+    func authenticate(reason: String) throws -> Bool { result }
+}
+
 @MainActor
 private func testCatastrophicPolicy() {
     do {
@@ -185,10 +190,92 @@ private func testAuthorizationStore() {
     }
 }
 
+@MainActor
+private func testGuardEngine() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("command-guard-engine-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    let store = AuthorizationStore(root: root)
+    let engine = GuardEngine(store: store)
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    func input(_ command: String) -> Data {
+        try! JSONSerialization.data(withJSONObject: [
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "cwd": "/tmp/project",
+            "tool_input": ["command": command],
+        ])
+    }
+
+    expect(engine.process(input: input("git status"), fallbackCWD: URL(fileURLWithPath: "/tmp/project"), now: now) == nil, "safe command is silent")
+    expect(engine.process(input: Data("{".utf8), fallbackCWD: URL(fileURLWithPath: "/tmp/project"), now: now) == nil, "malformed input is silent")
+
+    guard let denial = engine.process(input: input("git reset --hard"), fallbackCWD: URL(fileURLWithPath: "/tmp/project"), now: now),
+          let object = try? JSONSerialization.jsonObject(with: denial) as? [String: Any],
+          let output = object["hookSpecificOutput"] as? [String: String],
+          let reason = output["permissionDecisionReason"],
+          let match = reason.range(of: #"[0-9A-F]{4}-[0-9A-F]{2}"#, options: .regularExpression)
+    else {
+        expect(false, "dangerous command emits denial with code")
+        return
+    }
+    let code = String(reason[match])
+    expect(reason.contains("git.reset-hard"), "denial includes rule id")
+
+    do {
+        try store.authorize(code: code, now: now)
+        expect(engine.process(input: input("git reset --hard"), fallbackCWD: URL(fileURLWithPath: "/tmp/project"), now: now) == nil, "authorized exact command runs once")
+        expect(engine.process(input: input("git reset --hard"), fallbackCWD: URL(fileURLWithPath: "/tmp/project"), now: now) != nil, "authorization is consumed")
+    } catch {
+        expect(false, "authorize engine command: \(error)")
+    }
+}
+
+@MainActor
+private func testManualAuthorizer() {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("command-guard-auth-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    let store = AuthorizationStore(root: root)
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    do {
+        let approved = try store.recordPending(command: "git reset --hard", now: now)
+        let command = try ManualAuthorizer.authorize(
+            code: approved.code,
+            store: store,
+            authenticator: FakeAuthenticator(result: true),
+            now: now
+        )
+        expect(command == "git reset --hard", "manual authorization returns reviewed command")
+        let consumed = try store.consume(command: command, now: now)
+        expect(consumed, "successful authentication creates authorization")
+
+        let rejected = try store.recordPending(command: "rm -rf /", now: now)
+        do {
+            _ = try ManualAuthorizer.authorize(
+                code: rejected.code,
+                store: store,
+                authenticator: FakeAuthenticator(result: false),
+                now: now
+            )
+            expect(false, "rejected authentication must throw")
+        } catch {
+            let unauthorized = try store.consume(command: "rm -rf /", now: now)
+            expect(!unauthorized, "rejected authentication creates no authorization")
+        }
+    } catch {
+        expect(false, "manual authorizer: \(error)")
+    }
+}
+
 testHookProtocol()
 testShellScanner()
 testCatastrophicPolicy()
 testAuthorizationStore()
+testGuardEngine()
+testManualAuthorizer()
 
 if failures == 0 {
     print("PASS: command-guard-tests")
