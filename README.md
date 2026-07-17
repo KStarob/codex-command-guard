@@ -23,7 +23,14 @@ The policy covers high-impact forms of:
 The scanner recognizes ordinary shell command boundaries and nested
 `sh`/`bash`/`zsh -c` calls. Execution-bearing syntax it cannot safely reduce,
 such as command substitution and backticks, fails closed and requires one-time
-authorization.
+authorization. Forced recursive deletion also fails closed when its target
+contains an unresolved shell variable. Simple unconditional assignments in the
+same command are resolved first, so cleanup such as
+`workdir=/tmp/codex-preview; rm -rf "$workdir"` remains autonomous.
+
+Ordinary file deletion and explicit narrow recursive targets are unaffected.
+For example, `rm -f generated.json`, `rm -rf ./build`, and
+`rm -rf /tmp/codex-preview` remain allowed.
 
 ## Security Boundary
 

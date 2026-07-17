@@ -26,7 +26,11 @@ public enum CatastrophicPolicy {
 
     private static func evaluate(_ item: ScannedCommand, cwd: URL) -> PolicyDecision? {
         switch item.executable {
-        case "rm": return evaluateRM(item.arguments, cwd: cwd)
+        case "rm": return evaluateRM(
+            item.arguments,
+            variableBindings: item.variableBindings,
+            cwd: cwd
+        )
         case "git": return evaluateGit(item.arguments)
         case "dd": return item.arguments.contains(where: { $0.lowercased().hasPrefix("of=/dev/") })
             ? deny("device.raw-write", "Raw-device output is destructive") : nil
@@ -50,14 +54,69 @@ public enum CatastrophicPolicy {
         }
     }
 
-    private static func evaluateRM(_ args: [String], cwd: URL) -> PolicyDecision? {
+    private static func evaluateRM(
+        _ args: [String],
+        variableBindings: [String: String],
+        cwd: URL
+    ) -> PolicyDecision? {
         let flags = args.filter { $0.hasPrefix("-") }.joined().lowercased()
         guard flags.contains("r") && flags.contains("f") else { return nil }
         let targets = args.filter { !$0.hasPrefix("-") }
-        for target in targets where isBroadDeletionTarget(target, cwd: cwd) {
-            return deny("filesystem.rm-broad", "Broad recursive deletion target: \(target)")
+        for target in targets {
+            let resolved = resolveKnownVariables(target, bindings: variableBindings)
+            if resolved.contains("$") {
+                return deny(
+                    "filesystem.rm-dynamic-target",
+                    "Recursive deletion target contains an unresolved shell variable: \(target)"
+                )
+            }
+            if isBroadDeletionTarget(resolved, cwd: cwd) {
+                return deny("filesystem.rm-broad", "Broad recursive deletion target: \(target)")
+            }
         }
         return nil
+    }
+
+    private static func resolveKnownVariables(
+        _ target: String,
+        bindings: [String: String],
+        depth: Int = 0
+    ) -> String {
+        guard depth < 8 else { return target }
+        if target == "$HOME" || target.hasPrefix("$HOME/") {
+            return NSHomeDirectory() + String(target.dropFirst(5))
+        }
+        if target == "${HOME}" || target.hasPrefix("${HOME}/") {
+            return NSHomeDirectory() + String(target.dropFirst(7))
+        }
+        guard let reference = leadingVariableReference(target),
+              let value = bindings[reference.name]
+        else { return target }
+        return resolveKnownVariables(
+            value + String(target.dropFirst(reference.length)),
+            bindings: bindings,
+            depth: depth + 1
+        )
+    }
+
+    private static func leadingVariableReference(_ value: String) -> (name: String, length: Int)? {
+        guard value.first == "$" else { return nil }
+        if value.hasPrefix("${"), let closing = value.firstIndex(of: "}") {
+            let start = value.index(value.startIndex, offsetBy: 2)
+            let name = String(value[start..<closing])
+            guard isVariableName(name) else { return nil }
+            return (name, value.distance(from: value.startIndex, to: value.index(after: closing)))
+        }
+        let start = value.index(after: value.startIndex)
+        let end = value[start...].firstIndex(where: { $0 != "_" && !$0.isLetter && !$0.isNumber }) ?? value.endIndex
+        let name = String(value[start..<end])
+        guard isVariableName(name) else { return nil }
+        return (name, value.distance(from: value.startIndex, to: end))
+    }
+
+    private static func isVariableName(_ value: String) -> Bool {
+        guard let first = value.first, first == "_" || first.isLetter else { return false }
+        return value.dropFirst().allSatisfy { $0 == "_" || $0.isLetter || $0.isNumber }
     }
 
     private static func isBroadDeletionTarget(_ target: String, cwd: URL) -> Bool {
